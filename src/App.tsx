@@ -31,6 +31,7 @@ export default function App() {
             <Route path="dashboard" element={<Navigate to="/" replace />} />
             <Route path="new-request" element={<NewRequestPage />} />
             <Route path="tracking" element={<DeliveryTrackingPage />} />
+            <Route path="tracking/:orderId" element={<DeliveryTrackingPage />} />
             <Route path="requests" element={<MyRequestsPage />} />
             <Route path="robot" element={<SimpleRobotStatusPage />} />
             <Route path="map" element={<SimpleHospitalMapPage />} />

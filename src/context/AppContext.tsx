@@ -26,12 +26,14 @@ import { runUCS, generateUCSExplanation } from '../utils/ucs';
 
 export type DeliveryPhase =
   | 'IDLE'
-  | 'AVAILABILITY_CHECK'
-  | 'SAVE_ORIGINAL'
+  | 'REQUEST_RECEIVED'
+  | 'PREPARING'
+  | 'ITEM_READY'
   | 'MOVE_TO_PICKUP'
   | 'PICK_ITEM'
   | 'CALCULATE_DELIVERY_PATH'
   | 'NAVIGATING_TO_GOAL'
+  | 'ARRIVED_DESTINATION'
   | 'DELIVER_ITEM'
   | 'CALCULATE_RETURN_PATH'
   | 'NAVIGATING_RETURN'
@@ -73,6 +75,8 @@ interface AppContextType {
   submitDoctorRequest: (item: string, quantity: number, destination: NodeId, notes?: string) => { success: boolean; message: string; orderId?: string };
   cancelOrder: (orderId: string) => void;
   activeOrder: Order | null;
+  selectedTrackingOrderId: string | null;
+  selectTrackingOrder: (orderId: string) => void;
   doctorSteps: DoctorDeliveryStep[];
 
   // Robot State & Operations
@@ -598,7 +602,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       switch (deliveryPhase) {
         case 'IDLE': {
           // 1. Check item availability
-          setDeliveryPhase('AVAILABILITY_CHECK');
           setPhaseMessage(`Checking catalog inventory for ${order.item} (${order.quantity} units)...`);
           addLog('ORDER', `Starting delivery workflow for order ${order.id}`, 'info');
 
@@ -615,21 +618,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
           addLog('INVENTORY', check.message, 'success');
 
-          // 2. Save Original Robot Location
+          // Save Original Robot Location
           const savedLoc = robot.currentLocation;
           setOriginalSavedLocation(savedLoc);
           setRobot((prev) => ({ ...prev, originalLocation: savedLoc, activeOrderId: order.id, status: 'PICKING' }));
           setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, status: 'Processing', originalRobotLocation: savedLoc } : o)));
           addLog('ROBOT', `Robot original location saved: [${savedLoc}]`, 'info');
 
-          // If robot already at pickup location, jump to pick
+          // Move to Request Received stage
+          setDeliveryPhase('REQUEST_RECEIVED');
+          setPhaseMessage('✓ Request received. Your request has been sent to the pharmacy.');
+          break;
+        }
+
+        case 'REQUEST_RECEIVED': {
+          // Move to Preparing / Packing stage
+          setDeliveryPhase('PREPARING');
+          setPhaseMessage(`📦 Preparing your order: ${order.item} is being packed at Pharmacy.`);
+          break;
+        }
+
+        case 'PREPARING': {
+          // Deduct from inventory
+          const itemMatch = inventory.find((i) => i.name.toLowerCase().includes(order.item.toLowerCase()));
+          if (itemMatch) {
+            updateInventoryStock(itemMatch.id, itemMatch.quantity - order.quantity);
+          }
+
+          setDeliveryPhase('ITEM_READY');
+          setPhaseMessage(`✓ Item ready at Pharmacy. Robot is preparing to collect ${order.item}.`);
+          break;
+        }
+
+        case 'ITEM_READY': {
           if (robot.currentLocation === order.pickupLocation) {
             setDeliveryPhase('PICK_ITEM');
-            setPhaseMessage(`Robot at pickup point (${order.pickupLocation}). Loading payload...`);
+            setPhaseMessage(`📦 Robot picking up your item at ${order.pickupLocation}...`);
           } else {
-            // Need to navigate to pickup location first
             setDeliveryPhase('MOVE_TO_PICKUP');
-            setPhaseMessage(`Calculating path to pickup location (${order.pickupLocation})...`);
+            setPhaseMessage(`Robot moving toward ${order.pickupLocation} to collect order...`);
             const ucsToPickup = runUCS(robot.currentLocation, order.pickupLocation, edges);
             if (!ucsToPickup.success) {
               setDeliveryPhase('EMERGENCY_STOP');
@@ -654,24 +681,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setRobot((prev) => ({ ...prev, currentLocation: nextNode, status: 'NAVIGATING' }));
             setStripsState((prev) => ({ ...prev, robotLocation: nextNode }));
             consumeBattery(1.5);
-            setPhaseMessage(`Repositioning to pickup: reached ${nextNode} (${idx}/${path.length - 1})`);
+            setPhaseMessage(`Moving to pickup: reached ${nextNode}`);
             addLog('ROBOT', `Navigated to node [${nextNode}] en route to pickup`, 'info');
           } else {
             // Reached pickup location!
             setDeliveryPhase('PICK_ITEM');
-            setPhaseMessage(`Arrived at ${order.pickupLocation}. Ready to pick item.`);
+            setPhaseMessage(`📦 Robot arrived at ${order.pickupLocation}. Picking up item...`);
           }
           break;
         }
 
         case 'PICK_ITEM': {
           // STRIPS Action: Pick Item
-          // Deduct from inventory
-          const itemMatch = inventory.find((i) => i.name.toLowerCase().includes(order.item.toLowerCase()));
-          if (itemMatch) {
-            updateInventoryStock(itemMatch.id, itemMatch.quantity - order.quantity);
-          }
-
           setRobot((prev) => ({
             ...prev,
             hasItem: true,
@@ -683,7 +704,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setStripsState((prev) => ({
             ...prev,
             hasItem: true,
-            itemAvailable: false, // removed from dispensary shelf
+            itemAvailable: false,
             robotLocation: order.pickupLocation,
           }));
 
@@ -693,9 +714,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             'success'
           );
 
-          // Now calculate UCS to delivery destination
           setDeliveryPhase('CALCULATE_DELIVERY_PATH');
-          setPhaseMessage(`Running Uniform Cost Search for delivery route to ${order.destination}...`);
+          setPhaseMessage(`Finding best route to ${order.destination}...`);
           break;
         }
 
@@ -736,7 +756,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           navigationPathRef.current = outboundResult.path;
           navigationIndexRef.current = 0;
           setDeliveryPhase('NAVIGATING_TO_GOAL');
-          setPhaseMessage(`Navigating to ${order.destination} via optimal UCS trajectory...`);
+          setPhaseMessage(`🚚 Delivery in progress — Robot is on the way to ${order.destination}.`);
           break;
         }
 
@@ -754,13 +774,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }));
             setStripsState((prev) => ({ ...prev, robotLocation: nextNode }));
             consumeBattery(2);
-            setPhaseMessage(`Navigating outbound: reached ${nextNode} (Waypoint ${idx}/${path.length - 1})`);
+            setPhaseMessage(`🚚 On the way: reached ${nextNode} (en route to ${order.destination})`);
             addLog('ROBOT', `Robot moved to [${nextNode}] on delivery trajectory`, 'info');
           } else {
             // Reached destination!
-            setDeliveryPhase('DELIVER_ITEM');
-            setPhaseMessage(`Arrived at destination (${order.destination}). Initiating clinical handoff.`);
+            setDeliveryPhase('ARRIVED_DESTINATION');
+            setPhaseMessage(`✓ Robot arrived at Room ${order.destination}. Delivering your item...`);
           }
+          break;
+        }
+
+        case 'ARRIVED_DESTINATION': {
+          setDeliveryPhase('DELIVER_ITEM');
+          setPhaseMessage(`Delivering ${order.item} to ${order.destination}...`);
           break;
         }
 
@@ -789,7 +815,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             'success'
           );
 
-          setPhaseMessage(`Delivery confirmed for patient ${order.patient}. Setting return goal to saved original location [${originalSavedLocation}]...`);
+          setPhaseMessage(`✓ Delivered successfully: ${order.item} × ${order.quantity} delivered to ${order.destination}.`);
           setDeliveryPhase('CALCULATE_RETURN_PATH');
           break;
         }
@@ -840,7 +866,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           navigationPathRef.current = returnResult.path;
           navigationIndexRef.current = 0;
           setDeliveryPhase('NAVIGATING_RETURN');
-          setPhaseMessage(`Navigating return trajectory to ${originalSavedLocation}...`);
+          setPhaseMessage(`↩ Robot returning to starting location (${originalSavedLocation})...`);
           break;
         }
 
@@ -858,12 +884,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }));
             setStripsState((prev) => ({ ...prev, robotLocation: nextNode }));
             consumeBattery(2);
-            setPhaseMessage(`Returning: reached ${nextNode} (Waypoint ${idx}/${path.length - 1})`);
+            setPhaseMessage(`↩ Returning: reached ${nextNode} (en route to ${originalSavedLocation})`);
             addLog('ROBOT', `Robot returned through [${nextNode}]`, 'info');
           } else {
             // Reached exact original location!
             setDeliveryPhase('ORDER_COMPLETED');
-            setPhaseMessage(`Robot successfully returned to original location [${originalSavedLocation}]. Order completed.`);
+            setPhaseMessage(`✓ Delivery completed. Robot has returned to its starting location.`);
           }
           break;
         }
@@ -923,7 +949,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           addLog('STRIPS', `Action "Return Robot" satisfied. Robot restored at original location [${originalSavedLocation}].`, 'success');
 
           setDeliveryPhase('IDLE');
-          setPhaseMessage('Order completed. Robot MR-001 is docked and idle.');
+          setPhaseMessage('Order completed. Robot MR-001 is parked and ready.');
           break;
         }
 
@@ -1039,7 +1065,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => clearExecutionTimer();
   }, []);
 
-  // Doctor delivery steps computation
+  const [selectedTrackingOrderId, setSelectedTrackingOrderId] = useState<string | null>(null);
+
+  const selectTrackingOrder = useCallback((orderId: string) => {
+    setSelectedTrackingOrderId(orderId);
+    setActiveOrderId(orderId);
+  }, []);
+
+  // Doctor delivery steps computation per Section 13
   const doctorSteps: DoctorDeliveryStep[] = [
     {
       id: 'step-1',
@@ -1048,39 +1081,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     {
       id: 'step-2',
-      label: 'Item available',
+      label: 'Preparing',
       status:
-        deliveryPhase === 'IDLE'
+        deliveryPhase === 'IDLE' || deliveryPhase === 'REQUEST_RECEIVED'
           ? 'pending'
-          : deliveryPhase === 'AVAILABILITY_CHECK'
+          : deliveryPhase === 'PREPARING'
           ? 'current'
           : 'completed',
     },
     {
       id: 'step-3',
-      label: 'Robot preparing',
+      label: 'Robot picked up',
       status:
-        deliveryPhase === 'IDLE' || deliveryPhase === 'AVAILABILITY_CHECK'
+        ['IDLE', 'REQUEST_RECEIVED', 'PREPARING'].includes(deliveryPhase)
           ? 'pending'
-          : deliveryPhase === 'SAVE_ORIGINAL' || deliveryPhase === 'MOVE_TO_PICKUP' || deliveryPhase === 'PICK_ITEM'
+          : ['ITEM_READY', 'MOVE_TO_PICKUP', 'PICK_ITEM'].includes(deliveryPhase)
           ? 'current'
           : 'completed',
     },
     {
       id: 'step-4',
-      label: 'Robot travelling',
+      label: 'On the way',
       status:
-        deliveryPhase === 'CALCULATE_DELIVERY_PATH' || deliveryPhase === 'NAVIGATING_TO_GOAL'
+        ['CALCULATE_DELIVERY_PATH', 'NAVIGATING_TO_GOAL'].includes(deliveryPhase)
           ? 'current'
-          : ['DELIVER_ITEM', 'CALCULATE_RETURN_PATH', 'NAVIGATING_RETURN', 'ORDER_COMPLETED'].includes(deliveryPhase)
+          : ['ARRIVED_DESTINATION', 'DELIVER_ITEM', 'CALCULATE_RETURN_PATH', 'NAVIGATING_RETURN', 'ORDER_COMPLETED'].includes(deliveryPhase)
           ? 'completed'
           : 'pending',
     },
     {
       id: 'step-5',
-      label: 'Delivery',
+      label: 'Delivered',
       status:
-        deliveryPhase === 'DELIVER_ITEM'
+        ['ARRIVED_DESTINATION', 'DELIVER_ITEM'].includes(deliveryPhase)
           ? 'current'
           : ['CALCULATE_RETURN_PATH', 'NAVIGATING_RETURN', 'ORDER_COMPLETED'].includes(deliveryPhase)
           ? 'completed'
@@ -1088,13 +1121,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     {
       id: 'step-6',
-      label: 'Returning to starting location',
+      label: 'Returning',
       status:
-        deliveryPhase === 'CALCULATE_RETURN_PATH' || deliveryPhase === 'NAVIGATING_RETURN'
+        ['CALCULATE_RETURN_PATH', 'NAVIGATING_RETURN'].includes(deliveryPhase)
           ? 'current'
           : deliveryPhase === 'ORDER_COMPLETED'
           ? 'completed'
           : 'pending',
+    },
+    {
+      id: 'step-7',
+      label: 'Completed',
+      status: deliveryPhase === 'ORDER_COMPLETED' ? 'completed' : 'pending',
     },
   ];
 
@@ -1117,6 +1155,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       if (res.success && res.orderId) {
+        setSelectedTrackingOrderId(res.orderId);
         startOrderDelivery(res.orderId);
       }
       return res;
@@ -1134,6 +1173,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         isLoggedIn,
         doctorSteps,
         submitDoctorRequest,
+        selectedTrackingOrderId,
+        selectTrackingOrder,
         nodes,
         edges,
         toggleBlockEdge,

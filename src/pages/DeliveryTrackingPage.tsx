@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
-import { GraphCanvas } from '../components/map/GraphCanvas';
+import { LiveTrackingMap } from '../components/map/LiveTrackingMap';
 import {
   CheckCircle2,
   Clock,
@@ -11,14 +11,21 @@ import {
   ArrowRight,
   RotateCcw,
   PlusCircle,
-  Eye,
-  Check,
-  ChevronRight,
+  Package,
+  Truck,
+  Sparkles,
+  Play,
+  ArrowLeft,
 } from 'lucide-react';
 
 export const DeliveryTrackingPage: React.FC = () => {
   const navigate = useNavigate();
+  const { orderId } = useParams();
+  const [searchParams] = useSearchParams();
+  const orderIdParam = orderId || searchParams.get('id');
+
   const {
+    orders,
     activeOrder,
     robot,
     deliveryPhase,
@@ -27,230 +34,254 @@ export const DeliveryTrackingPage: React.FC = () => {
     activeUCSResult,
     returnUCSResult,
     originalSavedLocation,
+    startOrderDelivery,
     resetRobotToDock,
   } = useApp();
 
-  const [showMapRoute, setShowMapRoute] = useState(true);
+  // Find target order: either from URL param, active order, or first order in queue
+  const targetOrder =
+    (orderIdParam ? orders.find((o) => o.id === orderIdParam) : null) ||
+    activeOrder ||
+    orders[0] ||
+    null;
 
-  // If there's no active delivery order and robot is idle, show a friendly empty state
-  if (!activeOrder && robot.status === 'IDLE' && deliveryPhase === 'IDLE') {
+  // Active delivery path: if currently active, use live UCS calculation or stored order paths
+  const isCurrentlyDeliveringThisOrder =
+    activeOrder?.id === targetOrder?.id && deliveryPhase !== 'IDLE';
+
+  const isReturning = deliveryPhase === 'NAVIGATING_RETURN' || deliveryPhase === 'CALCULATE_RETURN_PATH';
+
+  const activePath = isCurrentlyDeliveringThisOrder
+    ? isReturning
+      ? returnUCSResult?.path || targetOrder?.returnPath || []
+      : activeUCSResult?.path || targetOrder?.deliveryPath || []
+    : targetOrder?.deliveryPath || [];
+
+  const routeCost = isCurrentlyDeliveringThisOrder
+    ? isReturning
+      ? returnUCSResult?.cost || targetOrder?.returnCost || 0
+      : activeUCSResult?.cost || targetOrder?.deliveryCost || 0
+    : targetOrder?.deliveryCost || 7;
+
+  // Determine packing & pickup animations
+  const isPreparing = isCurrentlyDeliveringThisOrder && deliveryPhase === 'PREPARING';
+  const isPickingUp = isCurrentlyDeliveringThisOrder && (deliveryPhase === 'PICK_ITEM' || deliveryPhase === 'ITEM_READY');
+  const isDelivered =
+    (isCurrentlyDeliveringThisOrder &&
+      ['DELIVER_ITEM', 'CALCULATE_RETURN_PATH', 'NAVIGATING_RETURN', 'ORDER_COMPLETED'].includes(deliveryPhase)) ||
+    targetOrder?.status === 'Delivered' ||
+    targetOrder?.status === 'Completed';
+
+  if (!targetOrder) {
     return (
       <div className="max-w-xl mx-auto py-12 text-center space-y-4 bg-white border border-slate-200 rounded-2xl p-8 shadow-xs">
         <div className="w-16 h-16 bg-blue-50 text-blue-600 rounded-2xl mx-auto flex items-center justify-center">
           <Bot className="w-8 h-8" />
         </div>
-        <h2 className="text-xl font-bold text-slate-900">No Active Delivery in Progress</h2>
+        <h2 className="text-xl font-bold text-slate-900">No Request Selected</h2>
         <p className="text-sm text-slate-500">
-          Robot MR-001 is currently parked at {robot.currentLocation} and waiting for requests.
+          Please select a request from My Requests or create a new delivery order.
         </p>
         <div className="pt-2 flex justify-center gap-3">
           <button
-            onClick={() => navigate('/new-request')}
-            className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs"
+            onClick={() => navigate('/requests')}
+            className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs"
           >
-            Create New Request
-          </button>
-          <button
-            onClick={() => navigate('/')}
-            className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold"
-          >
-            Return to Dashboard
+            Go to My Requests
           </button>
         </div>
       </div>
     );
   }
 
-  const activePath =
-    deliveryPhase === 'NAVIGATING_RETURN'
-      ? returnUCSResult?.path || []
-      : activeUCSResult?.path || [];
-
   return (
-    <div className="space-y-6 max-w-3xl mx-auto py-2">
-      {/* Header */}
+    <div className="space-y-6 max-w-4xl mx-auto py-2">
+      {/* Top Breadcrumb & Controls */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pb-3 border-b border-slate-200">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold text-slate-900">
-              {deliveryPhase === 'ORDER_COMPLETED'
-                ? 'Delivery Completed'
-                : 'Delivery in Progress'}
-            </h1>
-            <span
-              className={`px-2.5 py-0.5 rounded-full text-xs font-semibold ${
-                deliveryPhase === 'ORDER_COMPLETED'
-                  ? 'bg-emerald-100 text-emerald-800'
-                  : 'bg-blue-100 text-blue-800 animate-pulse'
-              }`}
-            >
-              {deliveryPhase === 'ORDER_COMPLETED' ? '✓ Completed' : '● Live'}
-            </span>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate('/requests')}
+            className="p-2 hover:bg-slate-100 rounded-lg text-slate-500 hover:text-slate-800 transition"
+            title="Back to My Requests"
+          >
+            <ArrowLeft className="w-5 h-5" />
+          </button>
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">Delivery Tracking</h1>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Live hospital robotics tracking and autonomous UCS routing.
+            </p>
           </div>
-          <p className="text-xs text-slate-500 mt-0.5">
-            Real-time delivery progress of {activeOrder?.item || 'clinical request'}
-          </p>
         </div>
 
         <div className="flex items-center gap-2">
+          {targetOrder.status === 'Pending' && !isCurrentlyDeliveringThisOrder && (
+            <button
+              onClick={() => startOrderDelivery(targetOrder.id)}
+              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>Start Delivery Now</span>
+            </button>
+          )}
+
           <button
             onClick={() => navigate('/new-request')}
-            className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5"
+            className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold flex items-center gap-1.5 shadow-xs"
           >
             <PlusCircle className="w-3.5 h-3.5" />
             <span>New Request</span>
           </button>
-          <button
-            onClick={() => navigate('/requests')}
-            className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold"
-          >
-            All Requests
-          </button>
         </div>
       </div>
 
-      {/* Main Status Card */}
-      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-5">
-        {/* Item & Destination Quick Bar */}
-        {activeOrder && (
-          <div className="p-4 bg-slate-50 border border-slate-200/80 rounded-xl flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-3">
-              <span className="font-bold text-slate-900 text-sm">
-                {activeOrder.item} × {activeOrder.quantity}
-              </span>
-              <span className="text-slate-300">•</span>
-              <span className="text-slate-600 flex items-center gap-1">
-                <MapPin className="w-3.5 h-3.5 text-blue-600" />
-                Delivering to: <strong className="text-slate-900">{activeOrder.destination}</strong>
-              </span>
+      {/* Main Order Header Card per Section 2 */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100">
+          <div>
+            <span className="text-xs font-bold text-blue-600 uppercase tracking-wider block">
+              Delivery Request
+            </span>
+            <div className="text-xl sm:text-2xl font-bold text-slate-900 mt-0.5">
+              {targetOrder.item} × {targetOrder.quantity}
             </div>
-
-            <div className="flex items-center gap-2 text-slate-500">
-              <span>Doctor: <strong className="text-slate-800">{activeOrder.notes?.replace('Prescribed by ', '') || 'Dr. Kumar'}</strong></span>
+            <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
+              <span className="font-semibold text-slate-700">Order ID: {targetOrder.id}</span>
+              <span>•</span>
+              <span className="flex items-center gap-1 text-emerald-700 font-bold">
+                <MapPin className="w-3.5 h-3.5 text-emerald-600" />
+                {targetOrder.destination}
+              </span>
             </div>
           </div>
-        )}
 
-        {/* 6-Stage Progress Checklist per Section 9 */}
-        <div className="space-y-3 py-2">
-          <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-            Live Delivery Checklist
-          </h2>
+          <span
+            className={`px-3 py-1 rounded-full text-xs font-bold border self-start sm:self-auto ${
+              targetOrder.status === 'Completed'
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : 'bg-blue-50 text-blue-700 border-blue-200 animate-pulse'
+            }`}
+          >
+            {targetOrder.status === 'Completed' ? '✓ Delivery Completed' : `● ${phaseMessage}`}
+          </span>
+        </div>
 
-          <div className="space-y-2 text-xs">
-            {doctorSteps.map((step, idx) => (
-              <div
-                key={step.id}
-                className={`p-3 rounded-xl border flex items-center justify-between transition ${
-                  step.status === 'completed'
-                    ? 'bg-emerald-50/70 border-emerald-200 text-emerald-900'
-                    : step.status === 'current'
-                    ? 'bg-blue-50 border-blue-300 text-blue-900 font-bold shadow-xs'
-                    : 'bg-white border-slate-100 text-slate-400'
-                }`}
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${
-                      step.status === 'completed'
+        {/* 7-Step Horizontal Progress Indicator per Section 13 */}
+        <div className="py-2 space-y-2">
+          <div className="flex items-center justify-between text-[11px] font-bold text-slate-500 uppercase tracking-wider">
+            <span>Delivery Progress</span>
+            <span className="text-blue-600 font-semibold lowercase">
+              {isCurrentlyDeliveringThisOrder ? 'live execution' : targetOrder.status}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 text-xs">
+            {doctorSteps.map((step, idx) => {
+              const isPast = step.status === 'completed';
+              const isCurrent = step.status === 'current';
+
+              return (
+                <div
+                  key={step.id}
+                  className={`p-2.5 rounded-xl border text-center transition flex flex-col items-center justify-center gap-1 ${
+                    isPast
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                      : isCurrent
+                      ? 'bg-blue-50 border-blue-400 text-blue-900 font-bold ring-2 ring-blue-500/20'
+                      : 'bg-slate-50/70 border-slate-100 text-slate-400'
+                  }`}
+                >
+                  <span
+                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                      isPast
                         ? 'bg-emerald-600 text-white'
-                        : step.status === 'current'
+                        : isCurrent
                         ? 'bg-blue-600 text-white animate-pulse'
-                        : 'bg-slate-100 text-slate-400'
+                        : 'bg-slate-200 text-slate-500'
                     }`}
                   >
-                    {step.status === 'completed' ? '✓' : idx + 1}
-                  </div>
-                  <span className="text-sm">{step.label}</span>
+                    {isPast ? '✓' : idx + 1}
+                  </span>
+                  <span className="text-[11px] leading-tight text-center">{step.label}</span>
                 </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
 
-                <span className="text-xs font-semibold">
-                  {step.status === 'completed' ? (
-                    <span className="text-emerald-700">Completed</span>
-                  ) : step.status === 'current' ? (
-                    <span className="text-blue-700 flex items-center gap-1">
-                      <span className="w-2 h-2 rounded-full bg-blue-600 animate-ping"></span>
-                      In progress...
-                    </span>
-                  ) : (
-                    <span className="text-slate-400">Waiting</span>
-                  )}
-                </span>
-              </div>
-            ))}
+      {/* Large Animated Hospital Map per Section 2 & 3 */}
+      <div className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="text-sm font-bold uppercase tracking-wider text-slate-800 flex items-center gap-2">
+            <span>Hospital Trajectory & Real-Time Route</span>
+          </h2>
+          <span className="text-xs font-semibold text-slate-500">
+            Dynamically solved via Uniform Cost Search
+          </span>
+        </div>
+
+        <LiveTrackingMap
+          order={targetOrder}
+          currentPath={activePath}
+          robotLocation={robot.currentLocation}
+          destination={targetOrder.destination}
+          pickupLocation={targetOrder.pickupLocation}
+          isPreparing={isPreparing}
+          isPickingUp={isPickingUp}
+          isDelivered={isDelivered}
+          isReturning={isReturning}
+          height={440}
+        />
+      </div>
+
+      {/* Section 8: Current Location Information Panel */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3 text-xs font-medium">
+        <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-xs space-y-1">
+          <span className="text-slate-400 text-[10px] uppercase font-bold block">Robot ID</span>
+          <div className="font-bold text-slate-900 text-sm flex items-center gap-1.5">
+            <Bot className="w-4 h-4 text-blue-600" />
+            <span>{robot.id}</span>
           </div>
         </div>
 
-        {/* Simple Robot Location & Route Status */}
-        <div className="p-4 bg-blue-50 border border-blue-200 rounded-xl space-y-2 text-xs">
-          <div className="flex items-center justify-between text-blue-900">
-            <span className="font-semibold flex items-center gap-1.5">
-              <Bot className="w-4 h-4 text-blue-600" />
-              {deliveryPhase === 'NAVIGATING_RETURN'
-                ? 'Robot Returning to Starting Location'
-                : 'Best route found'}
-            </span>
-            <button
-              onClick={() => setShowMapRoute(!showMapRoute)}
-              className="text-blue-700 hover:text-blue-900 font-bold underline flex items-center gap-1"
-            >
-              <Eye className="w-3.5 h-3.5" />
-              {showMapRoute ? 'Hide Map' : 'View Route on Map'}
-            </button>
+        <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-xs space-y-1">
+          <span className="text-slate-400 text-[10px] uppercase font-bold block">Current Location</span>
+          <div className="font-bold text-blue-700 text-sm flex items-center gap-1.5">
+            <MapPin className="w-4 h-4 text-blue-600" />
+            <span>{robot.currentLocation}</span>
           </div>
-
-          <div className="text-sm font-bold text-slate-900">
-            Robot Location: {robot.currentLocation}
-          </div>
-
-          <p className="text-xs text-blue-800">
-            {deliveryPhase === 'NAVIGATING_RETURN'
-              ? `The payload was delivered. The robot is now returning to its starting location (${originalSavedLocation}).`
-              : deliveryPhase === 'ORDER_COMPLETED'
-              ? '✓ Robot has safely returned to its docking location. Delivery completed successfully.'
-              : `Robot MR-001 is travelling along the lowest-cost clear corridors to ${activeOrder?.destination || 'destination'}.`}
-          </p>
         </div>
 
-        {/* Embedded Map Route View */}
-        {showMapRoute && (
-          <div className="space-y-2 pt-1">
-            <span className="text-xs font-bold text-slate-700">
-              Live Hospital Trajectory:
-            </span>
-            <div className="rounded-xl overflow-hidden border border-slate-200">
-              <GraphCanvas
-                height={340}
-                highlightPath={activePath}
-                goalNode={activeOrder?.destination}
-              />
-            </div>
+        <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-xs space-y-1">
+          <span className="text-slate-400 text-[10px] uppercase font-bold block">Destination</span>
+          <div className="font-bold text-emerald-700 text-sm flex items-center gap-1.5">
+            <MapPin className="w-4 h-4 text-emerald-600" />
+            <span>{isReturning ? originalSavedLocation : targetOrder.destination}</span>
           </div>
-        )}
+        </div>
 
-        {/* Completed Delivery Banner */}
-        {deliveryPhase === 'ORDER_COMPLETED' && (
-          <div className="p-5 bg-emerald-50 border border-emerald-300 rounded-xl text-center space-y-3">
-            <div className="w-12 h-12 bg-emerald-600 text-white rounded-full mx-auto flex items-center justify-center font-bold text-xl">
-              ✓
-            </div>
-            <div>
-              <h3 className="text-lg font-bold text-emerald-950">
-                Delivery Completed Successfully
-              </h3>
-              <p className="text-xs text-emerald-800 mt-1">
-                {activeOrder?.item} × {activeOrder?.quantity} delivered to {activeOrder?.destination}.
-                The robot has returned safely to {originalSavedLocation}.
-              </p>
-            </div>
-            <button
-              onClick={() => navigate('/new-request')}
-              className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition shadow-xs"
-            >
-              Start Another Delivery
-            </button>
+        <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-xs space-y-1">
+          <span className="text-slate-400 text-[10px] uppercase font-bold block">Route Cost</span>
+          <div className="font-bold text-slate-900 text-sm">
+            {routeCost} <span className="text-xs text-slate-500 font-normal">corridor weight</span>
           </div>
-        )}
+        </div>
+      </div>
+
+      {/* Detailed Status Explanation Box */}
+      <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-2xl text-xs text-blue-900 space-y-1">
+        <div className="font-bold flex items-center gap-1.5 text-sm">
+          <span>Current Status:</span>
+          <span className="text-blue-700">{phaseMessage}</span>
+        </div>
+        <p className="text-blue-800 text-[11px] leading-relaxed">
+          {deliveryPhase === 'NAVIGATING_RETURN'
+            ? `The medicine has been delivered to ${targetOrder.destination}. The robot is now returning to its docking base at ${originalSavedLocation} using the lowest-cost reverse corridor trajectory.`
+            : deliveryPhase === 'ORDER_COMPLETED'
+            ? `The delivery was completed successfully. Robot MR-001 has returned to its base and is available for new requests.`
+            : `The robot is moving node-by-node along the path calculated dynamically by Uniform Cost Search. If any corridor is blocked, the robot will automatically find another clear route.`}
+        </p>
       </div>
     </div>
   );
