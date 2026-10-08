@@ -1,0 +1,6 @@
+{
+  "name": "MediRoute AI - Clinical Robotics Ops",
+  "description": "Hospital autonomous delivery robot operations, state-space planning, and Uniform Cost Search navigation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
